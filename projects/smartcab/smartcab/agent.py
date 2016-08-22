@@ -16,18 +16,19 @@ sim_penalty = {}
 class LearningAgent(Agent):
     """An agent that learns to drive in the smartcab world."""
 
-    def __init__(self, env, alpha=None, gamma=.8, epsilon=.2): #
+    def __init__(self, env, omega=1, gamma=.8, epsilon=.2): #
         super(LearningAgent, self).__init__(env)  # sets self.env = env, state = None, next_waypoint = None, and a default color
         self.color = 'red'  # override color
         self.planner = RoutePlanner(self.env, self)  # simple route planner to get next_waypoint
         # TODO: Initialize any additional variables here
-        self.alpha = alpha # learning rate
+        self.omega = omega # power for construct polynomial learning rate
+        self.alpha =  None # polynomial learning rate = 1/(t^omega); form a constant learning rate: set omega to 0 and multiple 1/(t^omega) by a constant factor
         self.gamma = gamma # discount factor
         self.epsilon = epsilon # exploration rate
         self.initialize_Q() # initialize Q_hat(state, action) = 0.0 for all states and actions
         self.prev_state = None
         self.prev_index = None
-        self.data_key = (self.alpha, self.gamma, self.epsilon)
+        self.data_key = (self.omega, self.gamma, self.epsilon)
         self.penalty = 0.0
 
     
@@ -95,7 +96,7 @@ class LearningAgent(Agent):
         deadline = self.env.get_deadline(self)
 
         # TODO: Update state
-        self.alpha = 1./(t+1) # learning rate
+        self.alpha = 1./((t+1)**self.omega) # learning rate
         
         location = self.env.agent_states[self]['location']
         destination = self.env.agent_states[self]['destination']
@@ -135,12 +136,12 @@ class LearningAgent(Agent):
         #print "LearningAgent.update(): deadline = {}, inputs = {}, action = {}, reward = {}".format(deadline, inputs, action, reward)  # [debug]
 
 
-def run(Alpha, Gamma, Epsilon):
+def run(Omega, Gamma, Epsilon):
     """Run the agent for a finite number of trials."""
 
     # Set up environment and agent
     e = Environment()  # create environment (also adds some dummy traffic)
-    a = e.create_agent(LearningAgent, alpha=Alpha, gamma=Gamma, epsilon=Epsilon)  # create agent
+    a = e.create_agent(LearningAgent, omega=Omega, gamma=Gamma, epsilon=Epsilon)  # create agent
     e.set_primary_agent(a, enforce_deadline=True)  # specify agent to track
     # NOTE: You can set enforce_deadline=False while debugging to allow longer trials
 
@@ -152,9 +153,9 @@ def run(Alpha, Gamma, Epsilon):
     # NOTE: To quit midway, press Esc or close pygame window, or hit Ctrl+C on the command-line
 
 def tune_parameter():
-    Alpha = [None]
+    Omega = [1., .7, .8, .9, 2.0]
     Gamma = [.5, .6, .7, .8, .9]
-    Epsilon = [.1, .2, .3]
+    Epsilon = [.1, .2, .3, .4, .5]
     start = []
     destination = []
     success = []
@@ -163,10 +164,10 @@ def tune_parameter():
     parameters = []
     penalty = []
     net_reward = []
-    for a in Alpha:
+    for o in Omega:
         for g in Gamma:
             for e in Epsilon:
-                key = (a, g, e)
+                key = (o, g, e)
                 sim_start[key] = []
                 sim_destination[key] = []
                 sim_success[key] = []
@@ -174,7 +175,7 @@ def tune_parameter():
                 sim_deadline[key] = []
                 sim_penalty[key] = []
                 sim_net_reward[key] = []
-                run(Alpha=a, Gamma=g, Epsilon=e)
+                run(Omega=o, Gamma=g, Epsilon=e)
 
                 start += sim_start[key]
                 destination += sim_destination[key]
@@ -207,5 +208,28 @@ def tune_parameter():
 
 
 if __name__ == '__main__':
-    tune_parameter()
-    #run()
+    #tune_parameter() # uncomment this line for parameter tunning
+    tuned_omega = .7
+    tuned_gamma = .6
+    tuned_epsilon = .3
+    key = (tuned_omega, tuned_gamma, tuned_epsilon)
+    sim_start[key] = []
+    sim_destination[key] = []
+    sim_success[key] = []
+    sim_end_t[key] = []
+    sim_deadline[key] = []
+    sim_penalty[key] = []
+    sim_net_reward[key] = []
+    run(Omega=tuned_omega, Gamma=tuned_gamma, Epsilon=tuned_epsilon)
+
+    success_rate = sum(sim_success[key])/100.
+    avg_penalty = sum(sim_penalty[key])/100.
+    avg_reward = sum(sim_net_reward[key])/100.
+    time_cost = np.array(sim_deadline[key]) - np.array(sim_end_t[key])
+    avg_time_cost = time_cost.mean()
+    print "+"*64
+    print "Success Rate of SmartCab trained by optimal parameter setting: %.2f" %success_rate
+    print "Received Average Penalty of SmartCab trained by optimal parameter setting: ", avg_penalty
+    print "Received Average Net Reward of SmartCab trained by optimal parameter setting: ", avg_reward
+    print "Average Time Cost for SmartCab trained by optimal parameter setting: ", avg_time_cost
+    print '+'*64
