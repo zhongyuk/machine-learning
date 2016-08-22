@@ -2,58 +2,195 @@ import random
 from environment import Agent, Environment
 from planner import RoutePlanner
 from simulator import Simulator
+import numpy as np
+import pandas as pd
+
+sim_start = {}
+sim_destination = {}
+sim_success = {}
+sim_end_t = {}
+sim_deadline = {}
 
 class LearningAgent(Agent):
     """An agent that learns to drive in the smartcab world."""
 
-    def __init__(self, env):
+    def __init__(self, env, alpha=None, gamma=.8, epsilon=.2): #
         super(LearningAgent, self).__init__(env)  # sets self.env = env, state = None, next_waypoint = None, and a default color
         self.color = 'red'  # override color
         self.planner = RoutePlanner(self.env, self)  # simple route planner to get next_waypoint
         # TODO: Initialize any additional variables here
+        self.alpha = alpha # learning rate
+        self.gamma = gamma # discount factor
+        self.epsilon = epsilon # exploration rate
+        self.initialize_Q() # initialize Q_hat(state, action) = 0.0 for all states and actions
+        self.prev_state = None
+        self.prev_index = None
+        self.data_key = (self.alpha, self.gamma, self.epsilon)
+
+    
+    def initialize_Q_geoloc(self):
+        # data structure design: Q_hat[state] = [Q_values]
+        # Q_hat is a dictionary mapping states, actions to Q_values
+        # Q_values is list, directly mapping to self.env.valid_actions
+        self.Q_hat = {}
+        x = self.env.grid_size[0] #8
+        y = self.env.grid_size[1] #6
+        loc_x = range(-x+1,x)
+        loc_y = range(-y+1,y)
+        for lx in loc_x:
+            for ly in loc_y:
+                Q_hat_key = (lx, ly)
+                Q_hat_val = [0.0] * len(self.env.valid_actions)
+                self.Q_hat[Q_hat_key] = Q_hat_val
+
+    def initialize_Q(self):
+        # data structure design: Q_hat[state] = [Q_val for action 1, Q_val for action 2, Q_val for action 3, Q_val for action 4]
+        self.Q_hat = {}
+        valid_waypoint = [None, 'left', 'right', 'forward']
+        valid_light = ['green', 'red']
+        for light in valid_light:
+            for oncoming in valid_waypoint:
+                for left in valid_waypoint:
+                    for right in valid_waypoint:
+                        for valid_nxt_waypoint in valid_waypoint:
+                            valid_state = (light, oncoming, left, right, valid_nxt_waypoint)
+                            self.Q_hat[valid_state] = [0.0] * len(self.env.valid_actions)
+
 
     def reset(self, destination=None):
         self.planner.route_to(destination)
         # TODO: Prepare for a new trip; reset any variables here, if required
+        self.alpha = None
+        self.prev_state = None
+        self.prev_index = None
+        sim_start[self.data_key].append(self.env.agent_states[self]['location'])
+        sim_destination[self.data_key].append(self.env.agent_states[self]['destination'])
+        sim_deadline[self.data_key].append(self.env.agent_states[self]['deadline'])
+    
+    def choose_action(self, state):
+        # simulated-annealking like approach
+        rand_seed = np.random.seed(998372)
+        coin = np.random.binomial(1, 1-self.epsilon)
+        if (coin > 0) and (sum(self.Q_hat[state]) > 0.0): # take the action which argmax Q_hat(state, action)
+            max_Q_val = max(self.Q_hat[state])
+            index = self.Q_hat[state].index(max_Q_val)
+            action = self.env.valid_actions[index]
+        else: # take a random action
+            index = random.randint(0,len(self.env.valid_actions)-1)
+            action = self.env.valid_actions[index]
+        return action, index
+    
 
     def update(self, t):
         # Gather inputs
         self.next_waypoint = self.planner.next_waypoint()  # from route planner, also displayed by simulator
-        inputs = self.env.sense(self)
+        inputs = self.env.sense(self) #
         deadline = self.env.get_deadline(self)
 
         # TODO: Update state
-        location_keys = self.env.agent_states[self]['location']
-        self.state = self.env.intersections[location_keys]
+        self.alpha = 1./(t+1) # learning rate
+        
+        location = self.env.agent_states[self]['location']
+        destination = self.env.agent_states[self]['destination']
+        #self.state = (location[0]-destination[0], location[1]-destination[1])
+        self.state = (inputs['light'], inputs['oncoming'], inputs['left'], inputs['right'], self.next_waypoint)
         
         # TODO: Select action according to your policy
-        num = random.randint(0,3)
-        action = self.env.valid_actions[num]
+        # Pure randomly takeing actions
+        #index = random.randint(0,3)
+        #action = self.env.valid_actions[index]
+        action, index = self.choose_action(self.state)
 
         # Execute action and get reward
         reward = self.env.act(self, action)
+        
+        # Record simulated trail data
+        if self.env.trial_data['success'] == 1:
+            sim_success[self.data_key].append(True)
+            sim_end_t[self.data_key].append(self.env.agent_states[self]['deadline'])
+        else:
+            if self.env.enforce_deadline and self.env.agent_states[self]['deadline'] <= 0:
+                sim_success[self.data_key].append(False)
+                sim_end_t[self.data_key].append(self.env.agent_states[self]['deadline'])
 
         # TODO: Learn policy based on state, action, reward
+        self.Q_hat[self.state][index] = self.alpha * reward # receive immediate reward
+        
+        if (self.prev_state!=None) and (self.prev_index!=None): # check if previous state exists
+            # update previous state, action pair's discounted future Q value
+            self.Q_hat[self.prev_state][self.prev_index] += self.alpha * self.gamma * self.Q_hat[self.state][index]
+        
+        self.prev_state = self.state
+        self.prev_index = index
 
-        print "LearningAgent.update(): deadline = {}, inputs = {}, action = {}, reward = {}".format(deadline, inputs, action, reward)  # [debug]
+        #print "LearningAgent.update(): deadline = {}, inputs = {}, action = {}, reward = {}".format(deadline, inputs, action, reward)  # [debug]
 
 
-def run():
+def run(Alpha, Gamma, Epsilon):
     """Run the agent for a finite number of trials."""
 
     # Set up environment and agent
     e = Environment()  # create environment (also adds some dummy traffic)
-    a = e.create_agent(LearningAgent)  # create agent
-    e.set_primary_agent(a, enforce_deadline=False)  # specify agent to track
+    a = e.create_agent(LearningAgent, alpha=Alpha, gamma=Gamma, epsilon=Epsilon)  # create agent
+    e.set_primary_agent(a, enforce_deadline=True)  # specify agent to track
     # NOTE: You can set enforce_deadline=False while debugging to allow longer trials
 
     # Now simulate it
-    sim = Simulator(e, update_delay=0.5, display=True)  # create simulator (uses pygame when display=True, if available)
+    sim = Simulator(e, update_delay=.001, display=False)  # create simulator (uses pygame when display=True, if available)
     # NOTE: To speed up simulation, reduce update_delay and/or set display=False
 
     sim.run(n_trials=100)  # run for a specified number of trials
     # NOTE: To quit midway, press Esc or close pygame window, or hit Ctrl+C on the command-line
 
+def tune_parameter():
+    Alpha = [None]
+    Gamma = [.5, .6, .7, .8, .9]
+    Epsilon = [.1, .2, .3]
+    start = []
+    destination = []
+    success = []
+    end_time = []
+    deadline = []
+    indices = []
+    for a in Alpha:
+        for g in Gamma:
+            for e in Epsilon:
+                key = (a, g, e)
+                sim_start[key] = []
+                sim_destination[key] = []
+                sim_success[key] = []
+                sim_end_t[key] = []
+                sim_deadline[key] = []
+                run(Alpha=a, Gamma=g, Epsilon=e)
+
+                start += sim_start[key]
+                destination += sim_destination[key]
+                success += sim_success[key]
+                end_time += sim_end_t[key]
+                deadline += sim_deadline[key]
+                indices += [str(key)+str(i) for i in range(100)]
+    # for debug
+    #print "start length ", len(start)
+    #print "destination length ", len(destination)
+    #print "success length ", len(success)
+    #print "end_time length ", len(end_time)
+    #print "deadline length ", len(deadline)
+    df = pd.DataFrame({'start':start, 'destination':destination, 'success':success, 'end_time':end_time,
+                       'deadline': deadline}, index=indices)
+    df.to_csv('data.csv')
+
+    # testing purpose
+    #print "-"*30+"start"+"-"*30
+    #print sim_start
+    #print "-"*30+"destination"+"-"*30
+    #print sim_destination
+    #print "-"*25+"reached destination"+"-"*25
+    #print sim_success
+    #print "-"*25+"time to reach destination"+"-"*25
+    #print sim_end_t
+
+
 
 if __name__ == '__main__':
-    run()
+    tune_parameter()
+    #run()
