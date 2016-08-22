@@ -10,6 +10,8 @@ sim_destination = {}
 sim_success = {}
 sim_end_t = {}
 sim_deadline = {}
+sim_net_reward = {}
+sim_penalty = {}
 
 class LearningAgent(Agent):
     """An agent that learns to drive in the smartcab world."""
@@ -26,6 +28,7 @@ class LearningAgent(Agent):
         self.prev_state = None
         self.prev_index = None
         self.data_key = (self.alpha, self.gamma, self.epsilon)
+        self.penalty = 0.0
 
     
     def initialize_Q_geoloc(self):
@@ -66,6 +69,10 @@ class LearningAgent(Agent):
         sim_start[self.data_key].append(self.env.agent_states[self]['location'])
         sim_destination[self.data_key].append(self.env.agent_states[self]['destination'])
         sim_deadline[self.data_key].append(self.env.agent_states[self]['deadline'])
+        sim_net_reward[self.data_key].append(self.env.trial_data['net_reward'])
+        sim_penalty[self.data_key].append(self.penalty)
+        self.penalty = 0.0
+    
     
     def choose_action(self, state):
         # simulated-annealking like approach
@@ -103,6 +110,8 @@ class LearningAgent(Agent):
 
         # Execute action and get reward
         reward = self.env.act(self, action)
+        if reward < 0:
+            self.penalty += reward
         
         # Record simulated trail data
         if self.env.trial_data['success'] == 1:
@@ -136,7 +145,7 @@ def run(Alpha, Gamma, Epsilon):
     # NOTE: You can set enforce_deadline=False while debugging to allow longer trials
 
     # Now simulate it
-    sim = Simulator(e, update_delay=.001, display=False)  # create simulator (uses pygame when display=True, if available)
+    sim = Simulator(e, update_delay=.0001, display=False)  # create simulator (uses pygame when display=True, if available)
     # NOTE: To speed up simulation, reduce update_delay and/or set display=False
 
     sim.run(n_trials=100)  # run for a specified number of trials
@@ -151,7 +160,9 @@ def tune_parameter():
     success = []
     end_time = []
     deadline = []
-    indices = []
+    parameters = []
+    penalty = []
+    net_reward = []
     for a in Alpha:
         for g in Gamma:
             for e in Epsilon:
@@ -161,6 +172,8 @@ def tune_parameter():
                 sim_success[key] = []
                 sim_end_t[key] = []
                 sim_deadline[key] = []
+                sim_penalty[key] = []
+                sim_net_reward[key] = []
                 run(Alpha=a, Gamma=g, Epsilon=e)
 
                 start += sim_start[key]
@@ -168,15 +181,17 @@ def tune_parameter():
                 success += sim_success[key]
                 end_time += sim_end_t[key]
                 deadline += sim_deadline[key]
-                indices += [str(key)+str(i) for i in range(100)]
-    # for debug
+                penalty += sim_penalty[key]
+                net_reward += sim_net_reward[key]
+                parameters += [str(key)]*100
+    # debug purpose
     #print "start length ", len(start)
     #print "destination length ", len(destination)
     #print "success length ", len(success)
     #print "end_time length ", len(end_time)
     #print "deadline length ", len(deadline)
     df = pd.DataFrame({'start':start, 'destination':destination, 'success':success, 'end_time':end_time,
-                       'deadline': deadline}, index=indices)
+                       'deadline': deadline, 'penalty':penalty, 'net_reward':net_reward, 'parameters':parameters})
     df.to_csv('data.csv')
 
     # testing purpose
