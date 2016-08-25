@@ -37,13 +37,15 @@ class LearningAgent(Agent):
         self.Q_hat = {}
         valid_waypoint = [None, 'left', 'right', 'forward']
         valid_light = ['green', 'red']
+        deadline_info = [1, 2, 3]
         for light in valid_light:
             for oncoming in valid_waypoint:
                 for left in valid_waypoint:
                     for right in valid_waypoint:
                         for valid_nxt_waypoint in valid_waypoint:
-                            valid_state = (light, oncoming, left, right, valid_nxt_waypoint)
-                            self.Q_hat[valid_state] = [0.0] * len(self.env.valid_actions)
+                            for dl_info in deadline_info:
+                                valid_state = (light, oncoming, left, right, valid_nxt_waypoint, dl_info)
+                                self.Q_hat[valid_state] = [0.0] * len(self.env.valid_actions)
     
 
     def reset(self, destination=None):
@@ -66,7 +68,9 @@ class LearningAgent(Agent):
         coin = np.random.binomial(1, 1-self.epsilon)
         if (coin > 0) and (sum(self.Q_hat[state]) > 0.0): # take the action which argmax Q_hat(state, action)
             max_Q_val = max(self.Q_hat[state])
-            index = self.Q_hat[state].index(max_Q_val)
+            indices = [i for i, v in enumerate(self.Q_hat[state]) if v==max_Q_val]
+            rand_idx = random.randint(0, len(indices)-1)
+            index = indices[rand_idx]
             action = self.env.valid_actions[index]
         else: # take a random action
             index = random.randint(0,len(self.env.valid_actions)-1)
@@ -78,19 +82,26 @@ class LearningAgent(Agent):
         self.next_waypoint = self.planner.next_waypoint()  # from route planner, also displayed by simulator
         inputs = self.env.sense(self)
         deadline = self.env.get_deadline(self)
+        
+        if deadline < 10:
+            deadline_info = 1
+        elif deadline < 20:
+            deadline_info = 2
+        else:
+            deadline_info = 3
 
         # TODO: Update state
         self.alpha = 1./((t+1)**self.omega) # learning rate
         
         location = self.env.agent_states[self]['location']
         destination = self.env.agent_states[self]['destination']
-        self.state = (inputs['light'], inputs['oncoming'], inputs['left'], inputs['right'], self.next_waypoint)
+        self.state = (inputs['light'], inputs['oncoming'], inputs['left'], inputs['right'], self.next_waypoint, deadline_info)
         
         # TODO: Select action according to your policy
         # Pure randomly takeing actions
         #index = random.randint(0,3)
         #action = self.env.valid_actions[index]
-        action, index = self.choose_action(self.state)
+        action, index = self.choose_action(self.state) # choose the action maximize Q_value
 
         # Execute action and get reward
         reward = self.env.act(self, action)
@@ -110,7 +121,9 @@ class LearningAgent(Agent):
                 sim_end_t[self.data_key].append(self.env.agent_states[self]['deadline'])
 
         # TODO: Learn policy based on state, action, reward
-        self.Q_hat[self.state][index] = self.alpha * reward # receive immediate reward
+        old_Q = self.Q_hat[self.state][index]
+        
+        self.Q_hat[self.state][index] = self.alpha * reward + (1-self.alpha) * old_Q# receive immediate reward
         
         if (self.prev_state!=None) and (self.prev_index!=None): # check if previous state exists
             # update previous state, action pair's discounted future Q value
@@ -193,9 +206,9 @@ def tune_parameter():
 
 if __name__ == '__main__':
     #tune_parameter() # uncomment this line for parameter tunning
-    tuned_omega = .7
-    tuned_gamma = .6
-    tuned_epsilon = .3
+    tuned_omega = .9
+    tuned_gamma = .9
+    tuned_epsilon = .1
     key = (tuned_omega, tuned_gamma, tuned_epsilon)
     sim_start[key] = []
     sim_destination[key] = []
