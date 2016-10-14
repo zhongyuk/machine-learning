@@ -46,6 +46,10 @@ def augment_data():
     # 3) Color Jitter
     pass
 
+def preprocess_data(data_matrix):
+    # 1) Center the data/Subtract Mean 2) Change datatype
+    pass
+
 def initialize_variable(shape, mean=0.0, std=.1):
     # Initialize weights and biases based on given shape
     wt = tf.Variable(tf.truncated_normal(shape=shape, mean=mean, stddev=std ))
@@ -93,13 +97,91 @@ def convnet_model(data, weights, baises, dropout=True, keep_prob=.5):
     #fc = full_layer(fc, weights['fc2_wt'], biases['fc2_bi'], True, keep_prob)
     else:
         fc = full_layer(data, weights['fc1_wt'], biases['fc1_bi'], False)
-#fc = full_layer(fc, weights['fc2_wt'], biases['fc2_bi'], False)
+    #fc = full_layer(fc, weights['fc2_wt'], biases['fc2_bi'], False)
     output = full_layer(fc, weights['fc2_wt'], biases['fc2_bi'], False)
     return output
 
- 
 
-if __name__=='__main__': 
+def setup_graph(tf_data, convnet_shapes, hyperparams,):
+    # Setup ConvNet Computation Graph
+    print "Prepare network parameters", "."*32
+    graph = tf.Graph()
+    
+    with graph.as_default():
+        # Setup training, validation, testing dataset
+        tf_train_dataset = tf_data['train_X']
+        tf_train_labels = tf_data['train_y']
+        tf_valid_dataset = tf_data['valid_X']
+        tf_valid_lables = tf_data['valid_y']
+        tf_test_dataset = tf_data['test_X']
+        tf_test_labels = tf_data['test_y']
+        
+        # Initialize weights and biases
+        weights, biases = {}, {}
+        for key in convnet_shapes.keys():
+            weights[key], biases[key] = initialize_variable(convnet_shapes[key], \
+            hyperparams['init_mean'], hyperparams['init_std'])
+        
+        # HyperParameters
+        keep_prob = hyperparams['keep_prob']
+        learning_rate = hyperparams['learning_rate']
+        
+        # Compute Loss Function
+        train_logits = convnet_model(tf_train_dataset, weights, biases, True, keep_prob)
+        train_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(train_logits, tf_train_labels))
+        
+        # Optimizer
+        optimizer = tf.train.GradientDescentOptimizer(learning_rate).minimize(train_loss)
+        
+        # Prediction
+        train_prediction = tf.nn.softmax(train_logits)
+        valid_logits = convnet_model(tf_valid_dataset, weights, biases, False`)
+        valid_prediction = tf.nn.softmax(valid_logits)
+        valid_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(valid_logits, tf_valid_lables))
+        if not tf_test_dataset:
+            test_prediction = tf.nn.softmax(convnet_model(tf_test_dataset, weights, biases, False))
+        else:
+            test_prediction = None
+    return graph
+
+def train_model(graph, steps, feed_dict={})
+    # Train Convnet
+    print "Start training", '.'*32
+    num_steps = steps
+    train_losses = np.zeros(num_steps)
+    valid_losses = np.zeros(num_steps)
+    train_acc = np.zeros(num_steps)
+    valid_acc = np.zeros(num_steps)
+    
+    with tf.Session(graph=graph) as session:
+        tf.initialize_all_variables().run()
+        print('Initialized')
+        for step in range(num_steps):
+            _, tl, predictions = session.run([optimizer, train_loss, train_prediction], feed_dict=feed_dict)
+            train_losses[step] = tl
+            train_acc[step] = accuracy(predictions, train_label_batch)
+            # Compute validation set accuracy batch by batch
+            valid_losses[step] = valid_loss.eval()
+            valid_acc[step] = accuracy(valid_prediction.eval(), tf_valid_labels.eval())
+            if ((step % 50 == 0) or (step<20)):
+                print('Training loss at step %d: %f' % (step, tl))
+                print('Training accuracy: %.1f%%' % (train_acc[step]*100))
+                print('Validation loss at step %d: %f' % (step, valid_losses[step]))
+                print('Validation accuracy: %.1f%%' % (valid_acc[step]*100))
+    # Compute test set accuracy
+    print "Finished training", '.'*32
+    if not test_prediction:
+        test_acc = accuracy(test_prediction.eval(), tf_teset_labels.eval())
+    else:
+        test_acc = None
+    # Group training data into a dictionary
+    training_data = {'train_losses' : train_losses, 'train_acc' : train_acc, \
+                     'valid_losses' : valid_losses, 'valid_acc' : valid_acc, 'test_acc' : test_acc}
+    return graph, training_data
+
+
+
+if __name__=='__main__':
     # Load Data
     print "Load data", "."*32
     train_dataset, train_labels, test_dataset, test_labels = load_data()
@@ -129,12 +211,7 @@ if __name__=='__main__':
     # Mirror Reflection
     #train_LRF = train_reshape[:,:,::-1,:]
 
-    # Dataset Parameters
-    image_size = 32
-    num_labels = 10
-    num_channels = 3
-
-    # Data Preprocess
+    # Data Preprocess: change datatype; center the data
     print "Preprocess data", "."*32
     train_dataset = train_dataset.astype(np.float32)
     train_labels = (np.arange(num_labels)==train_labels[:,None]).astype(np.float32)
@@ -148,107 +225,48 @@ if __name__=='__main__':
     print 'Training set:\t', train_dataset.shape,'\t', train_labels.shape
     print 'Validation set:\t', valid_dataset.shape, '\t', valid_labels.shape
     print 'Testing set:\t', test_dataset.shape, '\t', test_labels.shape
-
+    
+    # Dataset Parameters
+    image_size = 32
+    num_labels = 10
+    num_channels = 3
+    
     # Network parameters
-    batch_size = 128
+    batch_size = 64
     kernel_size3 = 3
     kernel_size5 = 5
     num_filter = 16
     fc_size1 = 256
-    #fc_size2 = 64
-    valid_batch_size, test_batch_size = 500, 500
 
-    # ConvNet
-    print "Prepare network parameters", "."*32
-    graph = tf.Graph()
+    # Setup shapes for each layer in the convnet
+    convnet_shapes = {'conv1' : [kernel_size5, kernel_size5, num_channels, num_filter],
+                      'conv2' : [kernel_size3, kernel_size3, num_filter, num_filter],
+                      'conv3' : [kernel_size5, kernel_size5, num_filter, num_filter],
+                      'fc1'   : [(image_size/2/2/2)**2*num_filter, fc_size1],
+                      'fc2'   : [fc_size1, num_labels]}
 
-    with graph.as_default():
-	# Setup Input
-        tf_train_dataset = tf.placeholder(tf.float32, shape=(batch_size, image_size, image_size, num_channels))
-        tf_train_labels = tf.placeholder(tf.float32, shape=(batch_size, num_labels))
-        tf_valid_dataset = tf.placeholder(tf.float32, shape=(valid_batch_size, image_size, image_size, num_channels))
-        tf_test_dataset = tf.placeholder(tf.float32, shape=(test_batch_size, image_size, image_size, num_channels))
-        
-        # Setup Variables
-        convnet_shapes = {'conv1' : [kernel_size5, kernel_size5, num_channels, num_filter],
-			  'conv2' : [kernel_size3, kernel_size3, num_filter, num_filter],
-              'conv3' : [kernel_size5, kernel_size5, num_filter, num_filter],
-			  'fc1'   : [(image_size/2/2/2)**2*num_filter, fc_size1],
-              'fc2'   : [fc_size1, num_labels]}
-              #'fc3'   : [fc_size2, num_labels]}
+    # Prepare small batch of data for experimental training
+    train_batch, train_label_batch = train_dataset[:batch_size, :, :, :], train_labels[:batch_size,:]
+    valid_batch, valid_label_batch = valid_dataset[:32, :, :, :], valid_labels[:32,:]
+    print 'Dataset\t\tFeatureShape\t\tLabelShape'
+    print 'Training set:\t', train_dataset.shape,'\t', train_labels.shape
 
-        weights, biases = {}, {}
-        weights['conv1_wt'], biases['conv1_bi'] = initialize_variable(convnet_shapes['conv1'])
-        weights['conv2_wt'], biases['conv2_bi'] = initialize_variable(convnet_shapes['conv2'])
-        weights['conv3_wt'], biases['conv3_bi'] = initialize_variable(convnet_shapes['conv3'])
-        weights['fc1_wt'],   biases['fc1_bi']   = initialize_variable(convnet_shapes['fc1'])
-        weights['fc2_wt'],   biases['fc2_bi']   = initialize_variable(convnet_shapes['fc2'])
-        #weights['fc3_wt'],   biases['fc3_bi']   = initialize_variable(convnet_shapes['fc3'])
+    # Prepare data for tensorflow
+    tf_data = {'train_X': tf.constant(train_batch), 'train_y': tf.constant(train_label_batch),
+               'valid_X': tf.constant(valid_batch), 'valid_y': tf.constant(valid_label_batch),
+               'test_X' : None, 'test_y': None}
 
-        # HyperParameters
-        keep_prob = tf.placeholder(tf.float32)
-        global_step = tf.Variable(0)
-        learning_rate = tf.train.exponential_decay(.0001, global_step, 10000, .7, staircase=True)
-        
-        # Compute Loss Function
-        logits = convnet_model(tf_train_dataset, weights, biases, True, keep_prob)
-        loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits, tf_train_labels))
-        
-        # Optimizer
-        optimizer = tf.train.GradientDescentOptimizer(learning_rate).minimize(loss)
-        
-        # Prediction
-        train_prediction = tf.nn.softmax(logits)
-        valid_prediction = tf.nn.softmax(convnet_model(tf_valid_dataset, weights, biases, False))
-        test_prediction = tf.nn.softmax(convnet_model(tf_test_dataset, weights, biases, False))
+    # HyperParameters
+    hyperparams = {'keep_prob': 1.0, 'init_mean': 0.0, 'init_std': 0.01, 'learning_rate': 0.01}
 
-    # Setup training steps
-    print "Start training", '.'*32
-    num_steps = 30001
-    loss_val = np.zeros(num_steps)
-    train_acc = np.zeros(num_steps)
-    valid_acc = np.zeros(num_steps)
+    # Setup computation graph
+    graph = setup_graph(tf_data, convnet_shapes, hyperparams)
 
-    with tf.Session(graph=graph) as session:
-        tf.initialize_all_variables().run()
-        print('Initialized')
-        for step in range(num_steps):
-            offset = (step * batch_size) % (train_labels.shape[0] - batch_size)
-            batch_data = train_dataset[offset:(offset + batch_size), :, :, :]
-            batch_labels = train_labels[offset:(offset + batch_size), :]
-            feed_dict = {tf_train_dataset : batch_data, tf_train_labels : batch_labels, keep_prob : .7}
-            _, l, predictions = session.run([optimizer, loss, train_prediction], feed_dict=feed_dict)
-            
-            loss_val[step] = l
-            train_acc[step] = accuracy(predictions, batch_labels)
-
- 	    # Compute validation set accuracy batch by batch
-            i, valid_correct = 0, 0
-            while i < valid_dataset.shape[0]:
-                valid_data_batch = valid_dataset[i: i+valid_batch_size, :, :, :]
-                valid_label_batch = valid_labels[i: i+valid_batch_size, :]
-                valid_feed_dict = {tf_valid_dataset : valid_data_batch}
-                valid_correct += count_correct(valid_prediction.eval(feed_dict=valid_feed_dict), valid_label_batch)
-                i += valid_batch_size
-            valid_acc[step] = float(valid_correct)/valid_dataset.shape[0]
-            if ((step % 50 == 0) or (step<20)):
-                print('Minibatch loss at step %d: %f' % (step, l))
-                print('Minibatch accuracy: %.1f%%' % (train_acc[step]*100))
-                print('Validation accuracy: %.1f%%' % (valid_acc[step]*100))
-	
-	# Compute test set accuracy batch by batch
-	print "Finished training", '.'*32
-	i, test_correct = 0, 0
-	while i < test_dataset.shape[0]:
-	    test_data_batch = test_dataset[i: i+test_batch_size, :, :, :]
-	    test_label_batch = test_labels[i: i+test_batch_size, :]
-	    test_feed_dict = {tf_test_dataset : test_data_batch}
-	    test_correct += count_correct(test_prediction.eval(feed_dict=test_feed_dict), test_label_batch)
-	    i += test_batch_size
-	test_acc = float(test_correct)/test_dataset.shape[0]
-    print('Test accuracy: %.1f%%' % (test_acc*100))
+    # Train convnet
+    steps = 1001
+    graph, training_data = train_model(graph, steps)
     
-    # Save training data
-    training_data = {'loss_val' : loss_val, 'train_acc' : train_acc, 'valid_acc' : valid_acc, 'test_acc' : test_acc}
-    with open('training_data', 'w') as fh:
-	pickle.dump(training_data, fh)
+
+
+
+
