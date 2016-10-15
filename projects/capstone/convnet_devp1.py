@@ -2,6 +2,7 @@ import numpy as np
 import tensorflow as tf
 from six.moves import cPickle as pickle
 from sklearn.cross_validation import train_test_split
+import time
 
 def unpickle(file):
     # Load pickled data
@@ -46,11 +47,17 @@ def load_data():
     test_labels = np.array(test_batch['labels'])
     return train_dataset, train_labels,  test_dataset, test_labels
   
-def augment_data():
-    # 1) Mirror Reflection
-    # 2) Random Corp
-    # 3) Color Jitter
-    pass
+def augment_data(features, labels):
+    # 50% Upside Down Filp; 50% Mirror Flip
+    ud_ind = np.random.binomial(1, .5, features.shape[0]).astype(np.bool)
+    lf_ind = np.invert(ud_ind)
+    ud_features, ud_labels = features[ud_ind, :,:,:], labels[ud_ind]
+    ud_features = ud_features[:, ::-1, :, :]
+    lf_features, lf_labels = features[lf_ind, :,:,:], labels[lf_ind]
+    lf_features = lf_features[:, :, ::-1, :]
+    cat_features = np.concatenate((features, ud_features, lf_features), axis=0)
+    cat_labels = np.concatenate((labels, ud_labels, lf_labels))
+    return cat_features, cat_labels
 
 def preprocess_data(X, y, num_labels):
     # 1) Center the training data/Subtract Mean
@@ -92,7 +99,8 @@ def full_layer(x, w, b, dropout=True, keep_prob=.5):
 	fc = tf.nn.dropout(fc, keep_prob)
     return fc
 
-def convnet_model(data, weights, biases, dropout=True, keep_prob=.5):
+def convnet_model_stack(data, weights, biases, dropout=True, keep_prob=.5):
+    # Linearly Stacked CNN
     # Construct convolution layers
     conv = conv_layer(data, weights['conv1'], biases['conv1'])
     pool = pool_layer(conv, 'max')
@@ -113,7 +121,33 @@ def convnet_model(data, weights, biases, dropout=True, keep_prob=.5):
     output = full_layer(fc, weights['fc2'], biases['fc2'], False)
     return output
 
-def train_convnet(graph, tf_data, convnet_shapes, hyperparams, steps, minibatch=False, *args):
+def convnet_model_inception(data, weights, biases, dropout=True, keep_prob=.5):
+    # A Simple Inception CNN
+    # Construct convolution layers
+    conv_share = conv_layer(data, weights['conv1'], biases['conv1'])
+    pool = pool_layer(conv_share, 'max')
+    # Inception Layer
+    conv_top = conv_layer(pool, weights['conv2'], biases['conv2'])
+    pool_top = pool_layer(conv_top, 'max')
+    conv_bot = conv_layer(pool, weights['conv3'], biases['conv3'])
+    pool_bot = pool_layer(conv_bot, 'max')
+    # Concatenate layer
+    concat = tf.concat(3, [pool_top, pool_bot])
+    pool = pool_layer(concat, 'avg')
+    # Reshape data from 4D into 2D, prepare for fully connected layers
+    shape = pool.get_shape().as_list()
+    data = tf.reshape(pool, [shape[0], shape[1]*shape[2]*shape[3]])
+    # Construct fully connected layers
+    if dropout:
+        fc = full_layer(data, weights['fc1'], biases['fc1'], True, keep_prob)
+    #fc = full_layer(fc, weights['fc2_wt'], biases['fc2_bi'], True, keep_prob)
+    else:
+        fc = full_layer(data, weights['fc1'], biases['fc1'], False)
+    #fc = full_layer(fc, weights['fc2_wt'], biases['fc2_bi'], False)
+    output = full_layer(fc, weights['fc2'], biases['fc2'], False)
+    return output
+
+def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, steps, minibatch=False, *args):
     print "Prepare network parameters", "."*32
     with graph.as_default():
         # Setup training, validation, testing dataset
@@ -130,19 +164,21 @@ def train_convnet(graph, tf_data, convnet_shapes, hyperparams, steps, minibatch=
                                         hyperparams['init_mean'], hyperparams['init_std'])
         # HyperParameters
         keep_prob = hyperparams['keep_prob']
-        learning_rate = hyperparams['learning_rate']
+        global_step = tf.Variable(0)
+        learning_rate = tf.train.exponential_decay(hyperparams['learning_rate'], global_step, 10000, .7, staircase=True)
+        
         # Compute Loss Function
-        train_logits = convnet_model(tf_train_dataset, weights, biases, True, keep_prob)
+        train_logits = model(tf_train_dataset, weights, biases, True, keep_prob)
         train_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(train_logits, tf_train_labels))
         # Optimizer
         optimizer = tf.train.GradientDescentOptimizer(learning_rate).minimize(train_loss)
         # Prediction
         train_prediction = tf.nn.softmax(train_logits)
-        valid_logits = convnet_model(tf_valid_dataset, weights, biases, False)
+        valid_logits = model(tf_valid_dataset, weights, biases, False)
         valid_prediction = tf.nn.softmax(valid_logits)
         valid_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(valid_logits, tf_valid_lables))
         if tf_test_dataset!=None:
-            test_prediction = tf.nn.softmax(convnet_model(tf_test_dataset, weights, biases, False))
+            test_prediction = tf.nn.softmax(model(tf_test_dataset, weights, biases, False))
         else:
             test_prediction = None
     
@@ -158,6 +194,11 @@ def train_convnet(graph, tf_data, convnet_shapes, hyperparams, steps, minibatch=
         tf.initialize_all_variables().run()
         print('Initialized')
         for step in range(num_steps):
+            if step==0:
+                t = time.time()
+            elif step==1:
+                t = time.time() - t
+                print "Time cost for one epoch is: %.2f seconds" %(t)
             # Handle MiniBatch
             if minibatch:
                 offset = (step * batch_size) % (train_labels.shape[0] - batch_size)
@@ -221,8 +262,13 @@ if __name__=='__main__':
     print 'Validation set:\t', valid_dataset.shape, '\t', valid_labels.shape
     print 'Testing set:\t', test_dataset.shape, '\t', test_labels.shape
 
-    # Mirror Reflection
-    #train_LRF = train_reshape[:,:,::-1,:]
+    # Augment Data
+    print "Augment data", '.'*32
+    train_dataset, train_labels = augment_data(train_dataset, train_labels)
+    print 'Dataset\t\tFeatureShape\t\tLabelShape'
+    print 'Training set:\t', train_dataset.shape,'\t', train_labels.shape
+    print 'Validation set:\t', valid_dataset.shape, '\t', valid_labels.shape
+    print 'Testing set:\t', test_dataset.shape, '\t', test_labels.shape
 
     # Dataset Parameters
     image_size = 32
@@ -244,14 +290,13 @@ if __name__=='__main__':
     kernel_size3 = 3
     kernel_size5 = 5
     num_filter = 16
-    fc_size1 = 256
-    eval_size = 2000
+    fc_size1 = 128
 
     # Setup shapes for each layer in the convnet
     convnet_shapes = {'conv1' : [kernel_size5, kernel_size5, num_channels, num_filter],
                       'conv2' : [kernel_size3, kernel_size3, num_filter, num_filter],
                       'conv3' : [kernel_size5, kernel_size5, num_filter, num_filter],
-                      'fc1'   : [(image_size/2/2/2)**2*num_filter, fc_size1],
+                      'fc1'   : [(image_size/2/2/2)**2*num_filter*2, fc_size1],
                       'fc2'   : [fc_size1, num_labels]}
 
     # Prepare data for tensorflow
@@ -261,30 +306,18 @@ if __name__=='__main__':
                    'train_y': tf.placeholder(tf.float32, shape=(batch_size, num_labels)),
                    'valid_X': tf.constant(valid_dataset), 'valid_y': tf.constant(valid_labels),
                    'test_X' : tf.constant(test_dataset),  'test_y' : tf.constant(test_labels)}
-                   #'valid_X': tf.placeholder(tf.float32, shape=(eval_bath_size, image_size, image_size, num_channels)),
-                   #'valid_y': tf.placeholder(tf.float32, shape=(eval_batch_size, num_labels)),
-                   #'test_X' : tf.placeholder(tf.float32, shape=(eval_batch_size, image_size, image_size, num_channels)),
-                   #'test_y' : tf.placeholder(tf.float32, shape=(eval_batch_size, num_labels))}
-
-    # (**) Experimental run with Small Batch of Data
-    #train_batch, train_label_batch = generate_batch(train_dataset, train_labels, batch_size)
-    #valid_batch, valid_label_batch = generate_batch(valid_dataset, valid_labels, 32)
-    # Prepare data for tensorflow
-    #graph = tf.Graph()
-    #with graph.as_default():
-    #tf_data = {'train_X': tf.constant(train_batch), 'train_y': tf.constant(train_label_batch),
-    #'valid_X': tf.constant(valid_batch), 'valid_y': tf.constant(valid_label_batch),
-    #'test_X' : None, 'test_y': None}
 
     # HyperParameters
     hyperparams = {'keep_prob': 1.0, 'init_mean': 0.0, 'init_std': 0.01, 'learning_rate': 0.01}
 
     # Setup computation graph and train convnet
     steps = 501
-    _, training_data = train_convnet(graph, tf_data, convnet_shapes, hyperparams, steps, True, train_dataset,train_labels)
+    #model, save_data_name = convnet_model_stack, 'training_data_stack'
+    model, save_data_name = convnet_model_inception, 'training_data_inception'
+    _, training_data = train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, steps, True, train_dataset,train_labels)
 
     # Save data
-    with open('training_data', 'w') as fh:
+    with open(save_data_name, 'w') as fh:
         pickle.dump(training_data, fh)
 
 
