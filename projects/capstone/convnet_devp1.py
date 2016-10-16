@@ -194,11 +194,9 @@ def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, steps, min
         tf.initialize_all_variables().run()
         print('Initialized')
         for step in range(num_steps):
-            if step==0:
-                t = time.time()
-            elif step==1:
-                t = time.time() - t
-                print "Time cost for one epoch is: %.2f seconds" %(t)
+            if ((step>0) and (step%20==0)):
+                print "Time cost for the previous epoch is: %.2f seconds" %(time.time()-t)
+            t = time.time()
             # Handle MiniBatch
             if minibatch:
                 offset = (step * batch_size) % (train_labels.shape[0] - batch_size)
@@ -222,13 +220,13 @@ def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, steps, min
                 print('Training accuracy: %.1f%%' % (train_acc[step]*100))
                 #print('Validation loss at step %d: %f' % (step, valid_losses[step]))
                 print('Validation accuracy: %.1f%%' % (valid_acc[step]*100))
-    print "Finished training", '.'*32
-    # Compute test set accuracy
-    if test_prediction!=None:
-        test_acc = accuracy(test_prediction.eval(), tf_test_labels.eval())
-        print("Test accuracy: %1.f%%" %(test_acc*100))
-    else:
-        test_acc = None
+        print "Finished training", '.'*32
+        # Compute test set accuracy
+        if test_prediction!=None:
+            test_acc = accuracy(test_prediction.eval(), tf_test_labels.eval())
+            print("Test accuracy: %1.f%%" %(test_acc*100))
+        else:
+            test_acc = None
     # Group training data into a dictionary
     training_data = {'train_losses' : train_losses, 'train_acc' : train_acc, \
                      'valid_losses' : valid_losses, 'valid_acc' : valid_acc, 'test_acc' : test_acc}
