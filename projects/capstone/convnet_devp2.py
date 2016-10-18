@@ -69,15 +69,17 @@ def preprocess_data(X, y, num_labels):
     y_encoded = np.arange(num_labels)==y[:, None]
     return X_centered.astype(np.float32), y_encoded.astype(np.float32)
 
-def initialize_variable(shape, mean=0.0, std=.1):
-    # Initialize weights and biases based on given shape
-    wt = tf.Variable(tf.truncated_normal(shape=shape, mean=mean, stddev=std ))
-    bi = tf.Variable(tf.random_normal(shape=[shape[-1]], mean=mean, stddev=std))
-    return wt, bi
+def initialize_variables(convnet_shapes, initializer=tf.truncated_normal_initializer(stddev=.01)):
+    for item in convnet_shapes:
+        scope_name, shape = item[0], item[1]
+        with tf.variable_scope(scope_name) as scope:
+            w = tf.get_variable("wt", shape, initializer = initializer)
+            b = tf.get_variable("bi", shape[-1], initializer = tf.constant_initializer(1.0))
+            scope.reuse_variables()
 
 def conv_layer(x, w, b, stride=1, padding='SAME'):
     # Perform a convolution layer computation followed by a ReLu activation
-    # padding: "SAME" or "VALID" 
+    # padding: "SAME" or "VALID"
     conv = tf.nn.conv2d(x, w, [1, stride, stride, 1], padding=padding)
     relu = tf.nn.relu(conv + b)
     return relu
@@ -91,116 +93,118 @@ def pool_layer(x, method='max', kernel=2, stride=2, padding='SAME'):
     else:
         raise ValueError
 
-def full_layer(x, w, b, dropout=True, keep_prob=.5):
+def full_layer(x, w, b):
     # Perform a fully connected layer computation followed by a ReLu activation
     # If dropout is True, drop out is performed
     fc = tf.nn.relu(tf.matmul(x,w) + b)
-    if dropout:
-        fc = tf.nn.dropout(fc, keep_prob)
     return fc
 
-def convnet_model_stack(data, weights, biases, dropout=True, keep_prob=.5):
+def convnet_stack(data, scopes, dropout=True, keep_prob=.5):
     # Linearly Stacked CNN
-    # Construct convolution layers
-    conv = conv_layer(data, weights['conv1'], biases['conv1'])
-    pool = pool_layer(conv, 'max')
-    conv = conv_layer(pool, weights['conv2'], biases['conv2'], padding="SAME")
-    pool = pool_layer(conv, 'max')
-    conv = conv_layer(pool, weights['conv3'], biases['conv3'])
-    pool = pool_layer(conv, 'max')
-    # Reshape data from 4D into 2D, prepare for fully connected layers
-    shape = pool.get_shape().as_list()
-    data = tf.reshape(pool, [shape[0], shape[1]*shape[2]*shape[3]])
-    # Construct fully connected layers
-    if dropout:
-        fc = full_layer(data, weights['fc1'], biases['fc1'], True, keep_prob)
-    #fc = full_layer(fc, weights['fc2_wt'], biases['fc2_bi'], True, keep_prob)
-    else:
-        fc = full_layer(data, weights['fc1'], biases['fc1'], False)
-    #fc = full_layer(fc, weights['fc2_wt'], biases['fc2_bi'], False)
-    output = full_layer(fc, weights['fc2'], biases['fc2'], False)
+    x = data
+    for scope in scopes[:-1]:
+        if scope[:-1]=='conv':
+            with tf.variable_scope(scope, reuse=True):
+                w = tf.get_variable("wt")
+                b = tf.get_variable("bi")
+                x = conv_layer(x, w, b)
+            x = pool_layer(x, "max")
+        else:
+            with tf.variable_scope(scope, reuse=True):
+                w = tf.get_variable("wt")
+                b = tf.get_variable("bi")
+                shape = w.get_shape().as_list()
+                x = tf.reshape(x, [-1, shape[0]])
+                x = full_layer(x, w, b)
+                if dropout:
+                    x = tf.nn.dropout(x, keep_prob)
+    scope = scopes[-1]
+    with tf.variable_scope(scope, reuse=True):
+        w = tf.get_variable("wt")
+        b = tf.get_variable("bi")
+        output = full_layer(x, w, b)
     return output
 
-def convnet_model_inception(data, weights, biases, dropout=True, keep_prob=.5):
+
+def convnet_inception(data, scopes, dropout=True, keep_prob=.5):
     # A Simple Inception CNN
-    # Construct convolution layers
-    conv_share = conv_layer(data, weights['conv1'], biases['conv1'])
-    pool = pool_layer(conv_share, 'max')
-    # Inception Layer
-    conv_top = conv_layer(pool, weights['conv2'], biases['conv2'])
-    pool_top = pool_layer(conv_top, 'max')
-    conv_bot = conv_layer(pool, weights['conv3'], biases['conv3'])
-    pool_bot = pool_layer(conv_bot, 'max')
+    with tf.variable_scope(scopes[0], reuse=True):
+        w = tf.get_variable("wt")
+        b = tf.get_variable("bi")
+        x = conv_layer(data, w, b)
+    x = pool_layer(x, "max")
+    with tf.variable_scope(scopes[1], reuse=True):
+        w = tf.get_variable("wt")
+        b = tf.get_variable("bi")
+        x_top = conv_layer(x, w, b)
+    pool_top = pool_layer(x_top, "max")
+    with tf.variable_scope(scopes[2], reuse=True):
+        w = tf.get_variable("wt")
+        b = tf.get_variable("bi")
+        x_bot = conv_layer(x, w, b)
+    pool_bot = pool_layer(x_bot, "max")
     # Concatenate layer
     concat = tf.concat(3, [pool_top, pool_bot])
-    pool = pool_layer(concat, 'avg')
-    # Reshape data from 4D into 2D, prepare for fully connected layers
-    shape = pool.get_shape().as_list()
-    data = tf.reshape(pool, [shape[0], shape[1]*shape[2]*shape[3]])
-    # Construct fully connected layers
-    if dropout:
-        fc = full_layer(data, weights['fc1'], biases['fc1'], True, keep_prob)
-    #fc = full_layer(fc, weights['fc2_wt'], biases['fc2_bi'], True, keep_prob)
-    else:
-        fc = full_layer(data, weights['fc1'], biases['fc1'], False)
-    #fc = full_layer(fc, weights['fc2_wt'], biases['fc2_bi'], False)
-    output = full_layer(fc, weights['fc2'], biases['fc2'], False)
+    pool = pool_layer(concat, "avg")
+    # Fully connected layer
+    with tf.variable_scope(scopes[3], reuse=True):
+        w = tf.get_variable("wt")
+        b = tf.get_variable("b")
+        shape = w.get_shape().as_list()
+        x = tf.reshape(pool, [-1, shape[0]])
+        x = full_layer(x, w, b)
+        if dropout:
+            x = tf.nn.dropout(x, keep_prob)
+    with tf.variable_scope(scopes[4], reuse=True):
+        w = tf.get_variable("wt")
+        b = tf.get_variable("bi")
+        output = full_layer(x, w, b)
     return output
 
-def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, steps, minibatch=False, *args):
+
+def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, epoches, minibatch=False, *args):
     # Default exponential decay learning rate and AdamOptimizer
     print "Prepare network parameters", "."*32
     with graph.as_default():
         # Setup training, validation, testing dataset
-        tf_train_dataset = tf_data['train_X']
-        tf_train_labels = tf_data['train_y']
-        tf_valid_dataset = tf_data['valid_X']
-        tf_valid_lables = tf_data['valid_y']
-        tf_test_dataset = tf_data['test_X']
-        tf_test_labels = tf_data['test_y']
-        # Initialize weights and biases
-        weights, biases = {}, {}
-        for key in convnet_shapes.keys():
-            weights[key], biases[key] = initialize_variable(convnet_shapes[key], \
-                                        hyperparams['init_mean'], hyperparams['init_std'])
-        # HyperParameters
-        keep_prob = hyperparams['keep_prob']
-        init_lr = hyperparams['init_lr']
-        decay_steps = hyperparams['decay_steps']
-        decay_rate = hyperparams['decay_rate']
-        global_step = tf.Variable(0)
+        tf_train_dataset, tf_train_labels = tf_data['train_X'], tf_data['train_y']
+        tf_valid_dataset, tf_valid_labels = tf_data['valid_X'], tf_data['valid_y']
+        tf_test_dataset , tf_test_labels  = tf_data['test_X'] , tf_data['test_y']
+        # Initialize Weights and Biases
+        scopes = zip(*convnet_shapes)[0]
+        initialize_variables(convnet_shapes, initializer=hyperparams['initializer'])
+
+        # Unwrap HyperParameters
+        keep_prob, tfoptimizer = hyperparams['keep_prob'], hyperparams['optimizer']
+        init_lr,  global_step = hyperparams['init_lr'], tf.Variable(0)
+        decay_steps, decay_rate = hyperparams['decay_steps'], hyperparams['decay_rate']
         learning_rate = tf.train.exponential_decay(init_lr, global_step, decay_steps, decay_rate)
         
-        # Compute Loss Function
-        train_logits = model(tf_train_dataset, weights, biases, True, keep_prob)
+        # Compute Loss Function and Predictions
+        train_logits = model(tf_train_dataset, scopes, True, keep_prob)
         train_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(train_logits, tf_train_labels))
-        # Optimizer
-        tfoptimizer = hyperparams['optimizer']
-        optimizer = tfoptimizer(learning_rate).minimize(train_loss, global_step=global_step)
-        # Prediction
         train_prediction = tf.nn.softmax(train_logits)
-        valid_logits = model(tf_valid_dataset, weights, biases, False)
+        # Optimizer
+        optimizer = tfoptimizer(learning_rate).minimize(train_loss, global_step=global_step)
+        
+        valid_logits = model(tf_valid_dataset, scopes, False)
+        valid_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(valid_logits, tf_valid_labels))
         valid_prediction = tf.nn.softmax(valid_logits)
-        valid_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(valid_logits, tf_valid_lables))
         if tf_test_dataset!=None:
-            test_prediction = tf.nn.softmax(model(tf_test_dataset, weights, biases, False))
+            test_prediction = tf.nn.softmax(model(tf_test_dataset, scopes, False))
         else:
             test_prediction = None
     
     # Train Convnet
-    num_steps = steps
-    train_losses = np.zeros(num_steps)
-    valid_losses = np.zeros(num_steps)
-    train_acc = np.zeros(num_steps)
-    valid_acc = np.zeros(num_steps)
+    num_steps = epoches
+    train_losses, valid_losses = np.zeros(num_steps), np.zeros(num_steps)
+    train_acc, valid_acc = np.zeros(num_steps), np.zeros(num_steps)
     
     print "Start training", '.'*32
     with tf.Session(graph=graph) as session:
         tf.initialize_all_variables().run()
         print('Initialized')
         for step in range(num_steps):
-            #if ((step>0)):
-            #print "Time cost for the previous epoch is: %.2f seconds" %(time.time()-t)
             t = time.time()
             # Handle MiniBatch
             if minibatch:
@@ -217,19 +221,17 @@ def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, steps, min
                 train_acc[step] = accuracy(predictions, batch_labels)
             else:
                 train_acc[step] = accuracy(predictions, tf_train_labels.eval())
-            # Compute validation set accuracy batch by batch
+            # Compute validation set accuracy
             valid_losses[step] = valid_loss.eval()
-            valid_acc[step] = accuracy(valid_prediction.eval(), tf_valid_lables.eval())
+            valid_acc[step] = accuracy(valid_prediction.eval(), tf_valid_labels.eval())
             if ((step % 200 == 0)):
-                print('Training loss at step %d: %f' % (step, tl))
-                print('Training accuracy: %.1f%%' % (train_acc[step]*100))
-                #print('Validation loss at step %d: %f' % (step, valid_losses[step]))
-                print('Validation accuracy: %.1f%%' % (valid_acc[step]*100))
+                print('Epoch: %d:\t Loss: %f\t Time cost: %1.f\tTrain Acc: %.2f%%\tValid Acc: %2.f%%\tLearning rate: %.6f/' \
+                      %(step, tl, (time.time()-t), (train_acc[step]*100), (valid_acc[step]*100),learning_rate.eval(),))
         print "Finished training", '.'*32
         # Compute test set accuracy
         if test_prediction!=None:
             test_acc = accuracy(test_prediction.eval(), tf_test_labels.eval())
-            print("Test accuracy: %1.f%%" %(test_acc*100))
+            print("Test accuracy: %2.f%%" %(test_acc*100))
         else:
             test_acc = None
     # Group training data into a dictionary
@@ -292,15 +294,15 @@ if __name__=='__main__':
     batch_size = 512
     kernel_size3 = 3
     kernel_size5 = 5
-    num_filter = 32
-    fc_size1 = 256
+    num_filter = 64
+    fc_size1 = 512
 
     # Setup shapes for each layer in the convnet
-    convnet_shapes = {'conv1' : [kernel_size5, kernel_size5, num_channels, num_filter],
-                      'conv2' : [kernel_size3, kernel_size3, num_filter, num_filter],
-                      'conv3' : [kernel_size5, kernel_size5, num_filter, num_filter],
-                      'fc1'   : [(image_size/2/2/2)**2*num_filter*2, fc_size1],
-                      'fc2'   : [fc_size1, num_labels]}
+    convnet_shapes = [['conv1', [kernel_size5, kernel_size5, num_channels, num_filter]],
+                      ['conv2', [kernel_size3, kernel_size3, num_filter, num_filter]]  ,
+                      ['conv3', [kernel_size5, kernel_size5, num_filter, num_filter]]  ,
+                      ['fc1'  , [(image_size/2/2/2)**2*num_filter, fc_size1]]        ,
+                      ['fc2'  , [fc_size1, num_labels]]]
 
     # Prepare data for tensorflow
     graph = tf.Graph()
@@ -309,17 +311,16 @@ if __name__=='__main__':
                    'train_y': tf.placeholder(tf.float32, shape=(batch_size, num_labels)),
                    'valid_X': tf.constant(valid_dataset), 'valid_y': tf.constant(valid_labels),
                    'test_X' : tf.constant(test_dataset),  'test_y' : tf.constant(test_labels)}
-        tfoptimizer = tf.train.GradientDecentOptimizer
+        tfoptimizer = tf.train.AdamOptimizer
 
     # HyperParameters
-    hyperparams = {'keep_prob': 1.0, 'init_mean': 0.0, 'init_std': 0.008,
-                   'init_lr': 0.00032, 'decay_rate': .5, 'decay_steps': 100,
-                   'optimizer': tfoptimizer}
+    hyperparams = {'keep_prob': 0.5, 'init_lr': 0.0003, 'decay_rate': .5, 'decay_steps': 300, 'optimizer': tfoptimizer,
+                   'initializer': tf.truncated_normal_initializer(stddev=.015)}
 
     # Setup computation graph and train convnet
-    steps = 2001
-    #model, save_data_name = convnet_model_stack, 'training_data_stack'
-    model, save_data_name = convnet_model_inception, 'training_data_inception'
+    steps = 1201
+    model, save_data_name = convnet_stack, 'training_data_stack'
+    #model, save_data_name = convnet_inception, 'training_data_inception'
     _, training_data = train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, steps, True, train_dataset,train_labels)
 
     # Save data
