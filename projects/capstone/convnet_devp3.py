@@ -62,11 +62,15 @@ def augment_data(features, labels):
 def preprocess_data(X, y, num_labels):
     # 1) Center the training data/Subtract Mean
     # 2) Change datatype
+    # 3) Random Permute samples
     # 3) Change datatype to np.float32 to speed up
     avg = np.mean(X, 0)
     repeat_avg = np.broadcast_to(avg, X.shape)
     X_centered = X - repeat_avg
     y_encoded = np.arange(num_labels)==y[:, None]
+    perm = np.random.permutation(y_encoded.shape[0])
+    X_centered = X_centered[perm]
+    y_encoded = y_encoded[perm]
     return X_centered.astype(np.float32), y_encoded.astype(np.float32)
 
 def initialize_variables(convnet_shapes, initializer=tf.truncated_normal_initializer(stddev=.01), batch_norm=False):
@@ -78,6 +82,8 @@ def initialize_variables(convnet_shapes, initializer=tf.truncated_normal_initial
             if batch_norm:
                 gamma = tf.get_variable("gamma", shape[-1], initializer=tf.constant_initializer(1.0))
                 beta = tf.get_variable("beta", shape[-1], initializer=tf.constant_initializer(0.0))
+                avg = tf.get_variable("avg", shape[-1], initializer=tf.constant_initializer(0.0), trainable=False)
+                var = tf.get_variable("var", shape[-1], initializer=tf.constant_initializer(1.0), trainable=False)
                 moving_avg = tf.get_variable("moving_avg", shape[-1], initializer=tf.constant_initializer(0.0), trainable=False)
                 moving_var = tf.get_variable("moving_var", shape[-1], initializer=tf.constant_initializer(1.0), trainable=False)
             scope.reuse_variables()
@@ -92,25 +98,26 @@ def conv_layer(x, scope, stride=1, padding='SAME'):
     return conv+b
 
 
-def batch_norm_layer(x, scope, train, epsilon=0.001, decay=.9):
+def batch_norm_layer(x, scope, train, epsilon=0.001, decay=.999):
     # Perform a batch normalization after a conv layer or a fc layer
     # gamma: a scale factor
     # beta: an offset
     # epsilon: the variance epsilon - a small float number to avoid dividing by 0
     with tf.variable_scope(scope, reuse=True):
         gamma, beta = tf.get_variable("gamma"), tf.get_variable("beta")
+        avg, var = tf.get_variable("avg"), tf.get_variable("var")
         moving_avg, moving_var = tf.get_variable("moving_avg"), tf.get_variable("moving_var")
         shape = x.get_shape().as_list()
         if train:
-            batch_avg, batch_var = tf.nn.moments(x, range(len(shape)-1))
             ema = tf.train.ExponentialMovingAverage(decay=decay)
-            moving_avg = tf.assign(moving_avg, batch_avg)
-            moving_var = tf.assign(moving_var, batch_var)
+            batch_avg, batch_var = tf.nn.moments(x, range(len(shape)-1))
+            tf.assign(avg, batch_avg)
+            tf.assign(var, batch_var)
             # maintain moving averages
-            ema_op = ema.apply([moving_avg, moving_var])
+            ema_op = ema.apply([avg, var])
             with tf.control_dependencies([ema_op]):
-                moving_avg = ema.average(batch_avg)
-                moving_var = ema.average(batch_var)
+                tf.assign(moving_avg ,ema.average(avg))
+                tf.assign(moving_var, ema.average(var))
                 outputs = tf.nn.batch_normalization(x, batch_avg, batch_var, beta, gamma, epsilon)
         else:
             outputs = tf.nn.batch_normalization(x, moving_avg, moving_var, beta, gamma, epsilon)
@@ -218,8 +225,8 @@ def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, epoches, m
         train_prediction = tf.nn.softmax(train_logits)
         # Optimizer
         optimizer = tfoptimizer(learning_rate).minimize(train_loss, global_step=global_step)
-        
-        valid_logits = model(tf_valid_dataset, scopes, False)
+
+        valid_logits = model(tf_valid_dataset, scopes, False, keep_prob, batch_norm)
         # Without regularization
         #valid_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(valid_logits, tf_valid_labels))
         # L2 Regularization applied to fully connected layers
@@ -232,7 +239,7 @@ def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, epoches, m
         valid_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(valid_logits,tf_valid_labels) + beta*l2_reg_loss)
         valid_prediction = tf.nn.softmax(valid_logits)
         if tf_test_dataset!=None:
-            test_prediction = tf.nn.softmax(model(tf_test_dataset, scopes, False))
+            test_prediction = tf.nn.softmax(model(tf_test_dataset, scopes, False, keep_prob, batch_norm))
         else:
             test_prediction = None
     
@@ -250,6 +257,7 @@ def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, epoches, m
             # Handle MiniBatch
             if minibatch:
                 offset = (step * batch_size) % (train_labels.shape[0] - batch_size)
+                #offset = np.random.randint(train_labels.shape[0] - batch_size)
                 batch_data = train_dataset[offset:(offset+batch_size), :, :, :]
                 batch_labels = train_labels[offset:(offset+batch_size), :]
                 feed_dict = {tf_train_dataset:batch_data, tf_train_labels:batch_labels}
@@ -265,9 +273,8 @@ def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, epoches, m
             # Compute validation set accuracy
             valid_losses[step] = valid_loss.eval()
             valid_acc[step] = accuracy(valid_prediction.eval(), tf_valid_labels.eval())
-            if ((step % 1 == 0)):
-                print('Epoch: %d:\t Loss: %f\t Time cost: %1.f\tTrain Acc: %.2f%%\tValid Acc: %2.f%%\tLearning rate: %.6f' \
-                      %(step, tl, (time.time()-t), (train_acc[step]*100), (valid_acc[step]*100),learning_rate.eval(),))
+            print('Epoch: %d:\tLoss: %f\t\tTime cost: %1.f\t\tTrain Acc: %.2f%%\tValid Acc: %2.f%%\tLearning rate: %.6f' \
+                %(step, tl, (time.time()-t), (train_acc[step]*100), (valid_acc[step]*100),learning_rate.eval(),))
         print "Finished training", '.'*32
         # Compute test set accuracy
         if test_prediction!=None:
@@ -332,7 +339,7 @@ if __name__=='__main__':
     print 'Testing set:\t', test_dataset.shape, '\t', test_labels.shape
     
     # Network parameters
-    batch_size = 64
+    batch_size = 128
     kernel_size3 = 3
     kernel_size5 = 5
     num_filter = 64
@@ -355,15 +362,16 @@ if __name__=='__main__':
         tfoptimizer = tf.train.AdamOptimizer
 
     # HyperParameters
-    hyperparams = {'keep_prob': 0.46, 'init_lr': 0.0002, 'decay_rate': .9, 'decay_steps': 80,
+    hyperparams = {'keep_prob': 0.47, 'init_lr': 0.0004, 'decay_rate': .9, 'decay_steps': 77,
                    'optimizer': tfoptimizer, 'beta': 0.096, 'batch_norm': True,
-                   'initializer': tf.truncated_normal_initializer(stddev=.0104)}
+                   'initializer': tf.truncated_normal_initializer(stddev=.33)}
 
     # Setup computation graph and train convnet
-    steps = 1201
-    model, save_data_name = convnet_stack, 'training_data_stack3'
+    steps = 1163
+    model, save_data_name = convnet_stack, 'training_data_stack3.1'
     #model, save_data_name = convnet_inception, 'training_data_inception'
-    _, training_data = train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, steps, True, train_dataset,train_labels)
+    _, training_data = train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, \
+                                     steps, True, train_dataset, train_labels, batch_size)
 
     # Save data
     with open(save_data_name, 'w') as fh:
