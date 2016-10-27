@@ -61,12 +61,16 @@ def augment_data(features, labels):
 
 def preprocess_data(X, y, num_labels):
     # 1) Center the training data/Subtract Mean
-    # 2) Change datatype
-    # 3) Change datatype to np.float32 to speed up
+    # 2) One-hot encode labels
+    # 3) Random Permute samples
+    # 4) Change datatype to np.float32 to speed up
     avg = np.mean(X, 0)
     repeat_avg = np.broadcast_to(avg, X.shape)
     X_centered = X - repeat_avg
     y_encoded = np.arange(num_labels)==y[:, None]
+    perm = np.random.permutation(y_encoded.shape[0])
+    X_centered = X_centered[perm]
+    y_encoded = y_encoded[perm]
     return X_centered.astype(np.float32), y_encoded.astype(np.float32)
 
 def initialize_variables(convnet_shapes, initializer=tf.truncated_normal_initializer(stddev=.01)):
@@ -178,7 +182,7 @@ def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, epoches, m
         keep_prob, tfoptimizer = hyperparams['keep_prob'], hyperparams['optimizer']
         init_lr,  global_step = hyperparams['init_lr'], tf.Variable(0)
         decay_steps, decay_rate = hyperparams['decay_steps'], hyperparams['decay_rate']
-        learning_rate = tf.train.exponential_decay(init_lr, global_step, decay_steps, decay_rate, staircase=True)
+        learning_rate = tf.train.exponential_decay(init_lr, global_step, decay_steps, decay_rate, staircase=False)
         
         # Compute Loss Function and Predictions
         train_logits = model(tf_train_dataset, scopes, True, keep_prob)
@@ -291,7 +295,7 @@ if __name__=='__main__':
     print 'Testing set:\t', test_dataset.shape, '\t', test_labels.shape
     
     # Network parameters
-    batch_size = 512
+    batch_size = 1024
     kernel_size3 = 3
     kernel_size5 = 5
     num_filter = 64
@@ -314,12 +318,12 @@ if __name__=='__main__':
         tfoptimizer = tf.train.AdamOptimizer
 
     # HyperParameters
-    hyperparams = {'keep_prob': 0.5, 'init_lr': 0.0003, 'decay_rate': .5, 'decay_steps': 300, 'optimizer': tfoptimizer,
+    hyperparams = {'keep_prob': 0.4, 'init_lr': 0.0004, 'decay_rate': .9, 'decay_steps': 100, 'optimizer': tfoptimizer,
                    'initializer': tf.truncated_normal_initializer(stddev=.015)}
 
     # Setup computation graph and train convnet
     steps = 1201
-    model, save_data_name = convnet_stack, 'training_data_stack'
+    model, save_data_name = convnet_stack, 'training_data_stack2.5'
     #model, save_data_name = convnet_inception, 'training_data_inception'
     _, training_data = train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, steps, True, train_dataset,train_labels)
 

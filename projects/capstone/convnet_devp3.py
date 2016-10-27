@@ -61,9 +61,9 @@ def augment_data(features, labels):
 
 def preprocess_data(X, y, num_labels):
     # 1) Center the training data/Subtract Mean
-    # 2) Change datatype
+    # 2) One-hot encode labels
     # 3) Random Permute samples
-    # 3) Change datatype to np.float32 to speed up
+    # 4) Change datatype to np.float32 to speed up
     avg = np.mean(X, 0)
     repeat_avg = np.broadcast_to(avg, X.shape)
     X_centered = X - repeat_avg
@@ -73,7 +73,7 @@ def preprocess_data(X, y, num_labels):
     y_encoded = y_encoded[perm]
     return X_centered.astype(np.float32), y_encoded.astype(np.float32)
 
-def initialize_variables(convnet_shapes, initializer=tf.truncated_normal_initializer(stddev=.01), batch_norm=False):
+def initialize_variables_BatchNorm(convnet_shapes, initializer=tf.truncated_normal_initializer(stddev=.01), batch_norm=False):
     for item in convnet_shapes:
         scope_name, shape = item[0], item[1]
         with tf.variable_scope(scope_name) as scope:
@@ -86,6 +86,14 @@ def initialize_variables(convnet_shapes, initializer=tf.truncated_normal_initial
                 var = tf.get_variable("var", shape[-1], initializer=tf.constant_initializer(1.0), trainable=False)
                 moving_avg = tf.get_variable("moving_avg", shape[-1], initializer=tf.constant_initializer(0.0), trainable=False)
                 moving_var = tf.get_variable("moving_var", shape[-1], initializer=tf.constant_initializer(1.0), trainable=False)
+            scope.reuse_variables()
+
+def initialize_variables(convnet_shapes, initializer=tf.truncated_normal_initializer(stddev=.01)):
+    for item in convnet_shapes:
+        scope_name, shape = item[0], item[1]
+        with tf.variable_scope(scope_name) as scope:
+            w = tf.get_variable("wt", shape, initializer=initializer)
+            b = tf.get_variable("bi", shape[-1], initializer=tf.constant_initializer(1.0))
             scope.reuse_variables()
 
 def conv_layer(x, scope, stride=1, padding='SAME'):
@@ -153,7 +161,7 @@ def convnet_stack(data, scopes, train=True, keep_prob=.5, batch_norm=False):
                 x = tf.reshape(x, [shape[0], -1])
             x = full_layer(x, scope)
         if batch_norm:
-            x = batch_norm_layer(x, scope, train)
+            x = tf.contrib.layers.batch_norm(x, is_training=train)
         x = tf.nn.relu(x)
         if scope[:-1]=='conv':
             x = pool_layer(x, "max")
@@ -162,41 +170,44 @@ def convnet_stack(data, scopes, train=True, keep_prob=.5, batch_norm=False):
                 x = tf.nn.dropout(x, keep_prob)
     return x
 
-
-def convnet_inception(data, scopes, dropout=True, keep_prob=.5):
-    # A Simple Inception CNN
-    with tf.variable_scope(scopes[0], reuse=True):
-        w = tf.get_variable("wt")
-        b = tf.get_variable("bi")
-        x = conv_layer(data, w, b)
+def convnet_inception(data, scopes, train=True, keep_prob=.5, batch_norm=False):
+    x = data
+    # Layer1 - shared conv layer
+    x = conv_layer(x, scope[0])
+    if batch_norm:
+        x = tf.contrib.layers.batch_norm(x, is_training=train)
+    x = tf.nn.relu(x)
     x = pool_layer(x, "max")
-    with tf.variable_scope(scopes[1], reuse=True):
-        w = tf.get_variable("wt")
-        b = tf.get_variable("bi")
-        x_top = conv_layer(x, w, b)
-    pool_top = pool_layer(x_top, "max")
-    with tf.variable_scope(scopes[2], reuse=True):
-        w = tf.get_variable("wt")
-        b = tf.get_variable("bi")
-        x_bot = conv_layer(x, w, b)
-    pool_bot = pool_layer(x_bot, "max")
-    # Concatenate layer
-    concat = tf.concat(3, [pool_top, pool_bot])
-    pool = pool_layer(concat, "avg")
-    # Fully connected layer
-    with tf.variable_scope(scopes[3], reuse=True):
-        w = tf.get_variable("wt")
-        b = tf.get_variable("b")
-        shape = w.get_shape().as_list()
-        x = tf.reshape(pool, [-1, shape[0]])
-        x = full_layer(x, w, b)
-        if dropout:
-            x = tf.nn.dropout(x, keep_prob)
-    with tf.variable_scope(scopes[4], reuse=True):
-        w = tf.get_variable("wt")
-        b = tf.get_variable("bi")
-        output = full_layer(x, w, b)
-    return output
+    # Layer2 - Top conv layer
+    x_top = conv_layer(x, scope[1])
+    if batch_norm:
+        x_top = tf.contrib.layers.batch_norm(x_top, is_training=train)
+    x_top = tf.nn.relu(x_top)
+    x_top = pool_layer(x_top, "max")
+    # Layer2 - Bottom conv layer
+    x_bot = conv_layer(x, scope[2])
+    if batch_norm:
+        x_bot = tf.contrib.layers.batch_norm(x_bot, is_training=train)
+    x_bot = tf.nn.relu(x_bot)
+    x_bot = pool_layer(x_bot, "max")
+    # Layer3 - Concatenate layers
+    concat = tf.concat(3, [x_top, x_bot])
+    x_pool = pool_layer(concat, "avg")
+    # Layer4 - Fully connected layer1
+    shape = x_pool.get_shape().as_list()
+    x = tf.reshape(x_pool, [shape[0], -1])
+    x = full_layer(x, scope[3])
+    if batch_norm:
+        x = tf.contrib.layers.batch_norm(x, is_training=train)
+    x = tf.nn.relu(x)
+    if train:
+        x = tf.nn.dropout(x, keep_prob)
+    # Layer5 - Fully connected layer2 - output layer
+    x = full_layer(x, scope[4])
+    if batch_norm:
+        x = tf.contrib.layers.batch_norm(x, is_training=train)
+    x = tf.nn.relu(x)
+    return x
 
 
 def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, epoches, minibatch=False, *args):
@@ -210,7 +221,7 @@ def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, epoches, m
         # Initialize Weights and Biases
         scopes = zip(*convnet_shapes)[0]
         batch_norm = hyperparams['batch_norm']
-        initialize_variables(convnet_shapes, initializer=hyperparams['initializer'], batch_norm=batch_norm)
+        initialize_variables(convnet_shapes, initializer=hyperparams['initializer']) #, batch_norm=batch_norm
 
         # Unwrap HyperParameters
         beta = hyperparams['beta'] # regularization penality factor
@@ -339,7 +350,7 @@ if __name__=='__main__':
     print 'Testing set:\t', test_dataset.shape, '\t', test_labels.shape
     
     # Network parameters
-    batch_size = 128
+    batch_size = 64
     kernel_size3 = 3
     kernel_size5 = 5
     num_filter = 64
@@ -362,12 +373,12 @@ if __name__=='__main__':
         tfoptimizer = tf.train.AdamOptimizer
 
     # HyperParameters
-    hyperparams = {'keep_prob': 0.47, 'init_lr': 0.0004, 'decay_rate': .9, 'decay_steps': 77,
+    hyperparams = {'keep_prob': 0.47, 'init_lr': 0.0005, 'decay_rate': .9, 'decay_steps': 100,
                    'optimizer': tfoptimizer, 'beta': 0.096, 'batch_norm': True,
-                   'initializer': tf.truncated_normal_initializer(stddev=.33)}
+                   'initializer': tf.truncated_normal_initializer(stddev=.015)}
 
     # Setup computation graph and train convnet
-    steps = 1163
+    steps = 21
     model, save_data_name = convnet_stack, 'training_data_stack3.1'
     #model, save_data_name = convnet_inception, 'training_data_inception'
     _, training_data = train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, \
