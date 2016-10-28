@@ -295,7 +295,7 @@ if __name__=='__main__':
     print 'Testing set:\t', test_dataset.shape, '\t', test_labels.shape
     
     # Network parameters
-    batch_size = 1024
+    batch_size = 512
     kernel_size3 = 3
     kernel_size5 = 5
     num_filter = 64
@@ -318,12 +318,12 @@ if __name__=='__main__':
         tfoptimizer = tf.train.AdamOptimizer
 
     # HyperParameters
-    hyperparams = {'keep_prob': 0.4, 'init_lr': 0.0004, 'decay_rate': .9, 'decay_steps': 100, 'optimizer': tfoptimizer,
-                   'initializer': tf.truncated_normal_initializer(stddev=.015)}
+    hyperparams = {'keep_prob': 0.5, 'init_lr': 0.0007, 'decay_rate': .9, 'decay_steps': 100, 'optimizer': tfoptimizer,
+        'initializer': tf.truncated_normal_initializer(stddev=.013)}#tf.contrib.layers.variance_scaling_initializer()}#
 
     # Setup computation graph and train convnet
-    steps = 1201
-    model, save_data_name = convnet_stack, 'training_data_stack2.5'
+    steps = 2501
+    model, save_data_name = convnet_stack, 'training_data_stack2.6'
     #model, save_data_name = convnet_inception, 'training_data_inception'
     _, training_data = train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, steps, True, train_dataset,train_labels)
 

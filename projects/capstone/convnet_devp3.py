@@ -73,28 +73,21 @@ def preprocess_data(X, y, num_labels):
     y_encoded = y_encoded[perm]
     return X_centered.astype(np.float32), y_encoded.astype(np.float32)
 
-def initialize_variables_BatchNorm(convnet_shapes, initializer=tf.truncated_normal_initializer(stddev=.01), batch_norm=False):
+def initialize_variables(convnet_shapes, initializer=tf.truncated_normal_initializer(stddev=.01), batch_norm=False):
     for item in convnet_shapes:
         scope_name, shape = item[0], item[1]
         with tf.variable_scope(scope_name) as scope:
             w = tf.get_variable("wt", shape, initializer=initializer)
             b = tf.get_variable("bi", shape[-1], initializer=tf.constant_initializer(1.0))
-            if batch_norm:
-                gamma = tf.get_variable("gamma", shape[-1], initializer=tf.constant_initializer(1.0))
-                beta = tf.get_variable("beta", shape[-1], initializer=tf.constant_initializer(0.0))
-                avg = tf.get_variable("avg", shape[-1], initializer=tf.constant_initializer(0.0), trainable=False)
-                var = tf.get_variable("var", shape[-1], initializer=tf.constant_initializer(1.0), trainable=False)
-                moving_avg = tf.get_variable("moving_avg", shape[-1], initializer=tf.constant_initializer(0.0), trainable=False)
-                moving_var = tf.get_variable("moving_var", shape[-1], initializer=tf.constant_initializer(1.0), trainable=False)
+            if batch_norm and item!=convnet_shapes[-1]:
+                with tf.variable_scope('BatchNorm') as bnscope:
+                    gamma = tf.get_variable("gamma", shape[-1], initializer=tf.constant_initializer(1.0))
+                    beta = tf.get_variable("beta", shape[-1], initializer=tf.constant_initializer(0.0))
+                    moving_avg = tf.get_variable("moving_avg", shape[-1], initializer=tf.constant_initializer(0.0), trainable=False)
+                    moving_var = tf.get_variable("moving_var", shape[-1], initializer=tf.constant_initializer(1.0), trainable=False)
+                    bnscope.reuse_variables()
             scope.reuse_variables()
 
-def initialize_variables(convnet_shapes, initializer=tf.truncated_normal_initializer(stddev=.01)):
-    for item in convnet_shapes:
-        scope_name, shape = item[0], item[1]
-        with tf.variable_scope(scope_name) as scope:
-            w = tf.get_variable("wt", shape, initializer=initializer)
-            b = tf.get_variable("bi", shape[-1], initializer=tf.constant_initializer(1.0))
-            scope.reuse_variables()
 
 def conv_layer(x, scope, stride=1, padding='SAME'):
     # Perform a convolution layer computation
@@ -106,30 +99,28 @@ def conv_layer(x, scope, stride=1, padding='SAME'):
     return conv+b
 
 
-def batch_norm_layer(x, scope, train, epsilon=0.001, decay=.999):
+def BatchNorm_layer(x, scope, train, epsilon=0.001, decay=.999):
     # Perform a batch normalization after a conv layer or a fc layer
     # gamma: a scale factor
     # beta: an offset
     # epsilon: the variance epsilon - a small float number to avoid dividing by 0
     with tf.variable_scope(scope, reuse=True):
-        gamma, beta = tf.get_variable("gamma"), tf.get_variable("beta")
-        avg, var = tf.get_variable("avg"), tf.get_variable("var")
-        moving_avg, moving_var = tf.get_variable("moving_avg"), tf.get_variable("moving_var")
-        shape = x.get_shape().as_list()
-        if train:
-            ema = tf.train.ExponentialMovingAverage(decay=decay)
-            batch_avg, batch_var = tf.nn.moments(x, range(len(shape)-1))
-            tf.assign(avg, batch_avg)
-            tf.assign(var, batch_var)
-            # maintain moving averages
-            ema_op = ema.apply([avg, var])
-            with tf.control_dependencies([ema_op]):
-                tf.assign(moving_avg ,ema.average(avg))
-                tf.assign(moving_var, ema.average(var))
-                outputs = tf.nn.batch_normalization(x, batch_avg, batch_var, beta, gamma, epsilon)
-        else:
-            outputs = tf.nn.batch_normalization(x, moving_avg, moving_var, beta, gamma, epsilon)
-    return outputs
+        with tf.variable_scope('BatchNorm', reuse=True) as bnscope:
+            gamma, beta = tf.get_variable("gamma"), tf.get_variable("beta")
+            moving_avg, moving_var = tf.get_variable("moving_avg"), tf.get_variable("moving_var")
+            shape = x.get_shape().as_list()
+            control_inputs = []
+            if train:
+                avg, var = tf.nn.moments(x, range(len(shape)-1))
+                update_moving_avg = tf.python.training.moving_averages.assign_moving_average(moving_avg, avg, decay)
+                update_moving_var = tf.python.training.moving_averages.assign_moving_average(moving_var, var, decay)
+                control_inputs = [update_moving_avg, update_moving_var]
+            else:
+                avg = moving_avg
+                var = moving_var
+            with tf.control_dependencies(control_inputs):
+                output = tf.nn.batch_normalization(x, avg, var, offset=beta, scale=gamma, variance_epsilon=epsilon)
+    return output
 
 
 def pool_layer(x, method='max', kernel=2, stride=2, padding='SAME'):
@@ -149,64 +140,56 @@ def full_layer(x, scope):
         fc = tf.matmul(x,w) + b
     return fc
 
+def conv(x, scope, train, batch_norm):
+    x = conv_layer(x, scope)
+    if batch_norm:
+        x = BatchNorm_layer(x, scope, train)
+        #x = tf.contrib.layers.batch_norm(x, is_training=train, scope=scope, reuse=True)
+    x = tf.nn.relu(x)
+    x = pool_layer(x, "max")
+    return x
+
+def fc(x, scope, train, batch_norm, dropout, keep_prob=.5):
+    x = full_layer(x, scope)
+    if batch_norm:
+        #x = tf.contrib.layers.batch_norm(x, is_training=train, scope=scope, reuse=True)
+        x = BatchNorm_layer(x, scope, train)
+    x = tf.nn.relu(x)
+    if train and dropout:
+        x = tf.nn.dropout(x, keep_prob)
+    return x
+
 def convnet_stack(data, scopes, train=True, keep_prob=.5, batch_norm=False):
     # Linearly Stacked CNN
     x = data
-    for scope in scopes:
-        if scope[:-1]=='conv':
-            x = conv_layer(x, scope)
-        else:
-            if scope=='fc1':
-                shape = x.get_shape().as_list()
-                x = tf.reshape(x, [shape[0], -1])
-            x = full_layer(x, scope)
-        if batch_norm:
-            x = tf.contrib.layers.batch_norm(x, is_training=train)
-        x = tf.nn.relu(x)
-        if scope[:-1]=='conv':
-            x = pool_layer(x, "max")
-        else:
-            if train and (scope!=scopes[-1]):
-                x = tf.nn.dropout(x, keep_prob)
+    # CONV Layers 1~3
+    for scope in scopes[:3]:
+        x = conv(x, scope, train, batch_norm)
+    # FC Layer 4
+    shape = x.get_shape().as_list()
+    x = tf.reshape(x, [shape[0], -1])
+    x = fc(x, scopes[3], train, batch_norm, True, keep_prob)
+    # FC Layer 5 - Output layer, no need BatchNorm
+    x = fc(x, scopes[4], train, False, False)
     return x
 
 def convnet_inception(data, scopes, train=True, keep_prob=.5, batch_norm=False):
     x = data
     # Layer1 - shared conv layer
-    x = conv_layer(x, scope[0])
-    if batch_norm:
-        x = tf.contrib.layers.batch_norm(x, is_training=train)
-    x = tf.nn.relu(x)
-    x = pool_layer(x, "max")
+    x = conv(x, scope[0], train, batch_norm)
     # Layer2 - Top conv layer
-    x_top = conv_layer(x, scope[1])
-    if batch_norm:
-        x_top = tf.contrib.layers.batch_norm(x_top, is_training=train)
-    x_top = tf.nn.relu(x_top)
-    x_top = pool_layer(x_top, "max")
+    x_top = conv(x, scope[1], train, batch_norm)
     # Layer2 - Bottom conv layer
-    x_bot = conv_layer(x, scope[2])
-    if batch_norm:
-        x_bot = tf.contrib.layers.batch_norm(x_bot, is_training=train)
-    x_bot = tf.nn.relu(x_bot)
-    x_bot = pool_layer(x_bot, "max")
+    x_bot = conv(x, scope[2], train, batch_norm)
     # Layer3 - Concatenate layers
     concat = tf.concat(3, [x_top, x_bot])
     x_pool = pool_layer(concat, "avg")
     # Layer4 - Fully connected layer1
     shape = x_pool.get_shape().as_list()
     x = tf.reshape(x_pool, [shape[0], -1])
-    x = full_layer(x, scope[3])
-    if batch_norm:
-        x = tf.contrib.layers.batch_norm(x, is_training=train)
-    x = tf.nn.relu(x)
-    if train:
-        x = tf.nn.dropout(x, keep_prob)
+    x = fc(x, scope[3], train, batch_norm, True, keep_prob)
     # Layer5 - Fully connected layer2 - output layer
-    x = full_layer(x, scope[4])
-    if batch_norm:
-        x = tf.contrib.layers.batch_norm(x, is_training=train)
-    x = tf.nn.relu(x)
+    x = fc(x, scope[4], train, False, False)
     return x
 
 
@@ -221,10 +204,10 @@ def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, epoches, m
         # Initialize Weights and Biases
         scopes = zip(*convnet_shapes)[0]
         batch_norm = hyperparams['batch_norm']
-        initialize_variables(convnet_shapes, initializer=hyperparams['initializer']) #, batch_norm=batch_norm
+        initialize_variables(convnet_shapes, initializer=hyperparams['initializer'], batch_norm=batch_norm)
 
         # Unwrap HyperParameters
-        beta = hyperparams['beta'] # regularization penality factor
+        l2_reg = hyperparams['l2_reg'] # regularization penality factor
         keep_prob, tfoptimizer = hyperparams['keep_prob'], hyperparams['optimizer']
         init_lr,  global_step = hyperparams['init_lr'], tf.Variable(0)
         decay_steps, decay_rate = hyperparams['decay_steps'], hyperparams['decay_rate']
@@ -232,22 +215,21 @@ def train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, epoches, m
         
         # Compute Loss Function and Predictions
         train_logits = model(tf_train_dataset, scopes, True, keep_prob, batch_norm)
-        train_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(train_logits, tf_train_labels))
-        train_prediction = tf.nn.softmax(train_logits)
-        # Optimizer
-        optimizer = tfoptimizer(learning_rate).minimize(train_loss, global_step=global_step)
-
-        valid_logits = model(tf_valid_dataset, scopes, False, keep_prob, batch_norm)
         # Without regularization
-        #valid_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(valid_logits, tf_valid_labels))
-        # L2 Regularization applied to fully connected layers
+        train_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(train_logits, tf_train_labels))
+        # With L2 regularization applied to fully connected layers
         l2_reg_loss = 0
         with tf.variable_scope('fc1', reuse=True):
             l2_reg_loss += tf.nn.l2_loss(tf.get_variable('wt')) + tf.nn.l2_loss(tf.get_variable('bi'))
         with tf.variable_scope('fc2', reuse=True):
             l2_reg_loss += tf.nn.l2_loss(tf.get_variable('wt')) + tf.nn.l2_loss(tf.get_variable('bi'))
+        #train_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(train_logits, tf_train_labels) + l2_reg*l2_reg_loss)
+        train_prediction = tf.nn.softmax(train_logits)
+        # Optimizer
+        optimizer = tfoptimizer(learning_rate).minimize(train_loss, global_step=global_step)
 
-        valid_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(valid_logits,tf_valid_labels) + beta*l2_reg_loss)
+        valid_logits = model(tf_valid_dataset, scopes, False, keep_prob, batch_norm)
+        valid_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(valid_logits,tf_valid_labels))
         valid_prediction = tf.nn.softmax(valid_logits)
         if tf_test_dataset!=None:
             test_prediction = tf.nn.softmax(model(tf_test_dataset, scopes, False, keep_prob, batch_norm))
@@ -350,7 +332,7 @@ if __name__=='__main__':
     print 'Testing set:\t', test_dataset.shape, '\t', test_labels.shape
     
     # Network parameters
-    batch_size = 64
+    batch_size = 128
     kernel_size3 = 3
     kernel_size5 = 5
     num_filter = 64
@@ -373,12 +355,12 @@ if __name__=='__main__':
         tfoptimizer = tf.train.AdamOptimizer
 
     # HyperParameters
-    hyperparams = {'keep_prob': 0.47, 'init_lr': 0.0005, 'decay_rate': .9, 'decay_steps': 100,
-                   'optimizer': tfoptimizer, 'beta': 0.096, 'batch_norm': True,
-                   'initializer': tf.truncated_normal_initializer(stddev=.015)}
+    hyperparams = {'keep_prob': 0.47, 'init_lr': 0.002, 'decay_rate': .9, 'decay_steps': 100,
+                   'optimizer': tfoptimizer, 'l2_reg': 0.096, 'batch_norm': True,
+                   'initializer': tf.truncated_normal_initializer(stddev=.015)} #tf.contrib.layers.variance_scaling_initializer()}
 
     # Setup computation graph and train convnet
-    steps = 21
+    steps = 301
     model, save_data_name = convnet_stack, 'training_data_stack3.1'
     #model, save_data_name = convnet_inception, 'training_data_inception'
     _, training_data = train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, \
