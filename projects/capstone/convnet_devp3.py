@@ -3,6 +3,7 @@ import tensorflow as tf
 from six.moves import cPickle as pickle
 from sklearn.cross_validation import train_test_split
 import time
+from tensorflow.python.training import moving_averages
 
 def unpickle(file):
     # Load pickled data
@@ -79,7 +80,7 @@ def initialize_variables(convnet_shapes, initializer=tf.truncated_normal_initial
         with tf.variable_scope(scope_name) as scope:
             w = tf.get_variable("wt", shape, initializer=initializer)
             b = tf.get_variable("bi", shape[-1], initializer=tf.constant_initializer(1.0))
-            if batch_norm and item!=convnet_shapes[-1]:
+            if batch_norm:
                 with tf.variable_scope('BatchNorm') as bnscope:
                     gamma = tf.get_variable("gamma", shape[-1], initializer=tf.constant_initializer(1.0))
                     beta = tf.get_variable("beta", shape[-1], initializer=tf.constant_initializer(0.0))
@@ -112,8 +113,8 @@ def BatchNorm_layer(x, scope, train, epsilon=0.001, decay=.999):
             control_inputs = []
             if train:
                 avg, var = tf.nn.moments(x, range(len(shape)-1))
-                update_moving_avg = tf.python.training.moving_averages.assign_moving_average(moving_avg, avg, decay)
-                update_moving_var = tf.python.training.moving_averages.assign_moving_average(moving_var, var, decay)
+                update_moving_avg = moving_averages.assign_moving_average(moving_avg, avg, decay)
+                update_moving_var = moving_averages.assign_moving_average(moving_var, var, decay)
                 control_inputs = [update_moving_avg, update_moving_var]
             else:
                 avg = moving_avg
@@ -170,7 +171,7 @@ def convnet_stack(data, scopes, train=True, keep_prob=.5, batch_norm=False):
     x = tf.reshape(x, [shape[0], -1])
     x = fc(x, scopes[3], train, batch_norm, True, keep_prob)
     # FC Layer 5 - Output layer, no need BatchNorm
-    x = fc(x, scopes[4], train, False, False)
+    x = fc(x, scopes[4], train, batch_norm, False)
     return x
 
 def convnet_inception(data, scopes, train=True, keep_prob=.5, batch_norm=False):
@@ -189,7 +190,7 @@ def convnet_inception(data, scopes, train=True, keep_prob=.5, batch_norm=False):
     x = tf.reshape(x_pool, [shape[0], -1])
     x = fc(x, scope[3], train, batch_norm, True, keep_prob)
     # Layer5 - Fully connected layer2 - output layer
-    x = fc(x, scope[4], train, False, False)
+    x = fc(x, scope[4], train, batch_norm, False)
     return x
 
 
@@ -335,7 +336,7 @@ if __name__=='__main__':
     batch_size = 128
     kernel_size3 = 3
     kernel_size5 = 5
-    num_filter = 64
+    num_filter = 2
     fc_size1 = 512
 
     # Setup shapes for each layer in the convnet
@@ -360,7 +361,7 @@ if __name__=='__main__':
                    'initializer': tf.truncated_normal_initializer(stddev=.015)} #tf.contrib.layers.variance_scaling_initializer()}
 
     # Setup computation graph and train convnet
-    steps = 301
+    steps = 31
     model, save_data_name = convnet_stack, 'training_data_stack3.1'
     #model, save_data_name = convnet_inception, 'training_data_inception'
     _, training_data = train_convnet(graph, model, tf_data, convnet_shapes, hyperparams, \
